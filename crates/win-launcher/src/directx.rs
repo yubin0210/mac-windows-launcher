@@ -26,8 +26,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::DirectComposition::{
-    DCompositionCreateDevice, IDCompositionDevice, IDCompositionSurface, IDCompositionTarget,
-    IDCompositionVisual,
+    DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface,
+    IDCompositionTarget, IDCompositionVisual, IDCompositionVisual2,
 };
 #[cfg(windows)]
 use windows::Win32::Graphics::Dxgi::Common::{
@@ -240,40 +240,19 @@ pub struct Direct2DRenderer {
 
 #[cfg(windows)]
 impl Direct2DRenderer {
-    /// Creates a new `Direct2DRenderer` using the provided Direct3D 11 device and DirectComposition device.
-    pub fn new(
-        d3d_device: &ID3D11Device,
-        comp_device: &IDCompositionDevice,
-    ) -> Result<Self, RenderError> {
-        Self::with_size(d3d_device, comp_device, 1920, 200)
-    }
-
-    /// Creates a `Direct2DRenderer` with explicit pixel dimensions.
-    pub fn with_size(
-        d3d_device: &ID3D11Device,
-        comp_device: &IDCompositionDevice,
+    /// Creates a `Direct2DRenderer` bound to the DirectComposition pipeline visual and surface.
+    pub fn with_pipeline(
+        pipeline: &DirectCompositionPipeline,
         width: u32,
         height: u32,
     ) -> Result<Self, RenderError> {
-        let dxgi_device: IDXGIDevice = d3d_device.cast()?;
-        Self::from_dxgi_and_comp(&dxgi_device, comp_device, width, height)
-    }
-
-    /// Creates a `Direct2DRenderer` from an existing DXGI device and DirectComposition device.
-    pub fn from_dxgi_and_comp(
-        dxgi_device: &IDXGIDevice,
-        comp_device: &IDCompositionDevice,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, RenderError> {
-        let factory: ID2D1Factory1 =
-            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
-        let d2d_device: ID2D1Device = unsafe { factory.CreateDevice(dxgi_device)? };
+        let factory = pipeline.d2d_factory().clone();
+        let d2d_device = pipeline.d2d_device().clone();
         let d2d_context: ID2D1DeviceContext =
             unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
 
         let surface: IDCompositionSurface = unsafe {
-            comp_device.CreateSurface(
+            pipeline.dcomp_device().CreateSurface(
                 width,
                 height,
                 DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -281,7 +260,7 @@ impl Direct2DRenderer {
             )?
         };
 
-        let cached_brushes = CachedBrushes::new(&d2d_context).ok();
+        unsafe { pipeline.root_visual().SetContent(&surface)? };
 
         Ok(Self {
             factory,
@@ -290,21 +269,17 @@ impl Direct2DRenderer {
             surface,
             width,
             height,
-            cached_brushes,
+            cached_brushes: None,
         })
     }
 
-    /// Creates a `Direct2DRenderer` and immediately binds its surface to the provided root visual.
+    /// Creates a `Direct2DRenderer` bound to the DirectComposition pipeline visual and surface.
     pub fn with_visual(
-        d3d_device: &ID3D11Device,
-        comp_device: &IDCompositionDevice,
-        root_visual: &IDCompositionVisual,
+        pipeline: &DirectCompositionPipeline,
         width: u32,
         height: u32,
     ) -> Result<Self, RenderError> {
-        let renderer = Self::with_size(d3d_device, comp_device, width, height)?;
-        renderer.bind_to_visual(root_visual)?;
-        Ok(renderer)
+        Self::with_pipeline(pipeline, width, height)
     }
 
     /// Binds the composition surface to the specified visual target.
@@ -496,21 +471,23 @@ impl Direct2DRenderer {
     }
 }
 
-/// Encapsulates the Direct3D 11 device and DirectComposition visual pipeline on Windows.
+/// Encapsulates the Direct3D 11 device, Direct2D device, and DirectComposition visual pipeline on Windows.
 #[cfg(windows)]
 pub struct DirectCompositionPipeline {
     d3d_device: ID3D11Device,
     d3d_context: ID3D11DeviceContext,
     dxgi_device: IDXGIDevice,
-    dcomp_device: IDCompositionDevice,
+    d2d_factory: ID2D1Factory1,
+    d2d_device: ID2D1Device,
+    dcomp_device: IDCompositionDesktopDevice,
     target: IDCompositionTarget,
-    root_visual: IDCompositionVisual,
+    root_visual: IDCompositionVisual2,
 }
 
 #[cfg(windows)]
 impl DirectCompositionPipeline {
-    /// Initializes Direct3D 11 device with BGRA support and binds a DirectComposition
-    /// visual tree to the specified window handle.
+    /// Initializes Direct3D 11 device with BGRA support, attaches Direct2D 1.1 device,
+    /// and binds a DirectComposition visual tree to the specified window handle.
     pub fn new(hwnd: HWND) -> windows::core::Result<Self> {
         let mut d3d_device: Option<ID3D11Device> = None;
         let mut d3d_context: Option<ID3D11DeviceContext> = None;
@@ -560,17 +537,24 @@ impl DirectCompositionPipeline {
             )
         })?;
 
-        // Query DXGI device for DirectComposition interoperability
+        // Query DXGI device for Direct2D and DirectComposition interoperability
         let dxgi_device: IDXGIDevice = d3d_device.cast()?;
 
-        // Create DirectComposition device attached to DXGI device
-        let dcomp_device: IDCompositionDevice = unsafe { DCompositionCreateDevice(&dxgi_device)? };
+        // Create Direct2D 1.1 factory and device from DXGI device
+        let d2d_factory: ID2D1Factory1 =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        let d2d_device: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
+
+        // Create DirectComposition desktop device attached to the Direct2D device via DCompositionCreateDevice2.
+        // This binds the Direct2D device so IDCompositionSurface::BeginDraw can return ID2D1DeviceContext without E_INVALIDARG.
+        let dcomp_device: IDCompositionDesktopDevice =
+            unsafe { DCompositionCreateDevice2(&d2d_device)? };
 
         // Create topmost DirectComposition target for the layered window
         let target: IDCompositionTarget = unsafe { dcomp_device.CreateTargetForHwnd(hwnd, true)? };
 
         // Create and set root visual
-        let root_visual: IDCompositionVisual = unsafe { dcomp_device.CreateVisual()? };
+        let root_visual: IDCompositionVisual2 = unsafe { dcomp_device.CreateVisual()? };
         unsafe {
             target.SetRoot(&root_visual)?;
             dcomp_device.Commit()?;
@@ -580,6 +564,8 @@ impl DirectCompositionPipeline {
             d3d_device,
             d3d_context,
             dxgi_device,
+            d2d_factory,
+            d2d_device,
             dcomp_device,
             target,
             root_visual,
@@ -591,19 +577,29 @@ impl DirectCompositionPipeline {
         unsafe { self.dcomp_device.Commit() }
     }
 
-    /// Returns a reference to the root `IDCompositionVisual`.
-    pub fn root_visual(&self) -> &IDCompositionVisual {
+    /// Returns a reference to the root `IDCompositionVisual2`.
+    pub fn root_visual(&self) -> &IDCompositionVisual2 {
         &self.root_visual
     }
 
-    /// Returns a reference to the `IDCompositionDevice`.
-    pub fn dcomp_device(&self) -> &IDCompositionDevice {
+    /// Returns a reference to the `IDCompositionDesktopDevice`.
+    pub fn dcomp_device(&self) -> &IDCompositionDesktopDevice {
         &self.dcomp_device
     }
 
     /// Returns a reference to the `IDXGIDevice`.
     pub fn dxgi_device(&self) -> &IDXGIDevice {
         &self.dxgi_device
+    }
+
+    /// Returns a reference to the `ID2D1Factory1`.
+    pub fn d2d_factory(&self) -> &ID2D1Factory1 {
+        &self.d2d_factory
+    }
+
+    /// Returns a reference to the `ID2D1Device`.
+    pub fn d2d_device(&self) -> &ID2D1Device {
+        &self.d2d_device
     }
 
     /// Returns a reference to the `ID3D11Device`.
@@ -622,7 +618,7 @@ impl DirectCompositionPipeline {
     }
 
     /// Creates a new child visual within this composition device.
-    pub fn create_visual(&self) -> windows::core::Result<IDCompositionVisual> {
+    pub fn create_visual(&self) -> windows::core::Result<IDCompositionVisual2> {
         unsafe { self.dcomp_device.CreateVisual() }
     }
 

@@ -2,6 +2,8 @@
 //! Native Windows DirectComposition 120Hz system launcher for macOS Dock and Spotlight replication.
 
 use std::time::Instant;
+#[cfg(windows)]
+use std::time::Duration;
 use win_launcher::app_tracker::AppTracker;
 use win_launcher::directx::{Direct2DRenderer, DirectCompositionPipeline};
 use win_launcher::dock_view::DockView;
@@ -76,10 +78,8 @@ fn run_windows_launcher(hide_taskbar: bool) {
         }
     };
 
-    let mut renderer = match Direct2DRenderer::with_visual(
-        pipeline.d3d_device(),
-        pipeline.dcomp_device(),
-        pipeline.root_visual(),
+    let mut renderer = match Direct2DRenderer::with_pipeline(
+        &pipeline,
         config.width as u32,
         config.height as u32,
     ) {
@@ -157,6 +157,7 @@ fn run_windows_launcher(hide_taskbar: bool) {
 
     let mut last_frame = Instant::now();
     let mut last_tracker_poll = Instant::now();
+    let mut last_render_err_log = Instant::now() - Duration::from_secs(10);
 
     'render_loop: while window.is_open() {
         let now = Instant::now();
@@ -344,23 +345,35 @@ fn run_windows_launcher(hide_taskbar: bool) {
         let tray_geom = dock_view.get_tray_geometry();
         let squircle_pts = dock_view.get_tray_squircle_contour();
         if let Err(e) = renderer.render_dock(&render_items, tray_geom, &squircle_pts) {
-            eprintln!("Warning: Direct2D surface render error: {e}");
+            if last_render_err_log.elapsed().as_secs() >= 3 {
+                eprintln!("Warning: Direct2D surface render error: {e}");
+                last_render_err_log = Instant::now();
+            }
         }
 
         // Rasterize Top Menu Bar
         if let Err(e) = menu_bar_renderer.render(&menu_bar_view, menu_bar_window.width() as f32) {
-            eprintln!("Warning: Menu Bar Direct2D render error: {e}");
+            if last_render_err_log.elapsed().as_secs() >= 3 {
+                eprintln!("Warning: Menu Bar Direct2D render error: {e}");
+                last_render_err_log = Instant::now();
+            }
         }
 
         // Advance Stage Manager animation and render left shelf
         stage_view.update(dt, &stage_tracker);
         if let Err(e) = stage_renderer.draw_stage_shelf(stage_view.cards()) {
-            eprintln!("Warning: Stage Manager Direct2D render error: {e}");
+            if last_render_err_log.elapsed().as_secs() >= 3 {
+                eprintln!("Warning: Stage Manager Direct2D render error: {e}");
+                last_render_err_log = Instant::now();
+            }
         }
 
         // Commit composition tree changes to DWM
         if let Err(e) = pipeline.commit() {
-            eprintln!("Warning: composition commit error: {e}");
+            if last_render_err_log.elapsed().as_secs() >= 3 {
+                eprintln!("Warning: composition commit error: {e}");
+                last_render_err_log = Instant::now();
+            }
         }
 
         // Synchronize with display refresh rate (120Hz on supported monitors)
