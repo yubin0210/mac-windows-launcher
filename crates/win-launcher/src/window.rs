@@ -270,6 +270,12 @@ mod win32 {
             self.is_open
         }
 
+        pub fn queue_event(&mut self, event: WindowEvent) {
+            if let Ok(mut events) = self.shared_state.events.lock() {
+                events.push_back(event);
+            }
+        }
+
         fn cleanup(&mut self) {
             self.is_open = false;
             if !self.hwnd.0.is_null() {
@@ -416,8 +422,7 @@ impl DockWindow {
     pub fn queue_event(&mut self, event: WindowEvent) {
         #[cfg(windows)]
         {
-            // Not needed in production Win32 message pump, but provided for testing consistency
-            let _ = event;
+            self.inner.queue_event(event);
         }
 
         #[cfg(not(windows))]
