@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/mac-physics-core",
+    "crates/mac-spec-extractor",
+    "crates/win-launcher",
+]
+resolver = "2"

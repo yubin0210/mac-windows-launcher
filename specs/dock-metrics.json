@@ -1,0 +1,8 @@
+{
+  "base_icon_size": 48.0,
+  "max_icon_size": 128.0,
+  "magnification_spread": 150.0,
+  "squircle_exponent": 4.5,
+  "border_radius": 16.0,
+  "icon_padding": 10.0
+}

@@ -1,0 +1,10 @@
+[package]
+name = "mac-spec-extractor"
+version = "0.1.0"
+edition = "2021"
+description = "macOS REA spec extraction CLI and models"
+
+[dependencies]
+mac-physics-core = { path = "../mac-physics-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
