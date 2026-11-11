@@ -1,12 +1,12 @@
 # Windows 검증 기록
 
-2026-11-11 실행 기반 변경. 로컬 호스트는 macOS ARM64이며 실제 Windows 런타임을 실행하지 못했다. CI smoke 추가는 CI 실행 성공을 뜻하지 않는다.
+2026-11-11 구현 시작, 2026-11-12 KST Windows CI 실행 결과 추가. 로컬 호스트는 macOS ARM64다. Windows CI의 API·설치 검사와 실제 Windows 10/11 화면·입력 검증을 구분한다.
 
 ## 자동 확인
 
 - 로컬 순수 모델 및 mock 테스트: cargo test --workspace.
 - Windows 전용 코드 컴파일: cargo check --target x86_64-pc-windows-gnu -p win-launcher --all-targets.
-- 실제 backend smoke: CI에 명시적 실행 추가. 이 작업 세션에서 실행하지 않음.
+- 실제 backend smoke: Windows CI에서 8개 통과. 환경과 실행 링크는 아래 2026-11-12 기록 참고.
 
 ## 실제 Windows에서 확인할 사항
 
@@ -25,7 +25,7 @@
 
 ## 미완성 범위
 
-device lost 복구와 실제 Windows 사용성 검증이 남아 있다. Dock/Spotlight/메뉴바/Stage Manager 및 설치/업데이트/제거 검증 코드는 구현했으나 native 실행과 성능 측정 결과는 아직 없다.
+device lost 복구와 실제 Windows 10/11 사용성 검증이 남아 있다. Dock/Spotlight/메뉴바/Stage Manager의 API smoke 및 설치·재설치·제거는 Windows CI에서 실행했고 유휴 CPU/working set 표본이 있다. 외형·IME·실제 모니터 전환·재부팅·이전 공개 버전 업그레이드·애니메이션/검색 프레임 측정은 미검증이다.
 
 ## 2단계 실제 Windows 확인 항목
 
@@ -98,18 +98,18 @@ native smoke는 실제 DWM 등록/속성 갱신과 축소 HWND 크기를 검사�
 
 ## 6단계 패키지·성능 검증
 
-현재 버전 `1.1.0-alpha.1`. 이 세션은 macOS에서 모델 테스트/Windows 대상 컴파일까지만 실행한다. 아래 상태를 실제 Windows에서 실행한 후 갱신한다.
+현재 버전 `1.1.0-alpha.1`. 로컬 모델 테스트/대상 컴파일에 이어 Windows CI를 실행했다. 아래 상태는 2026-11-12 KST 최초 성공 실행 기준이며 실제 Windows 10/11 사용성은 별도 확인한다.
 
 | 항목 | 현재 증거 |
 |---|---|
-| release 실행 파일·Inno 설치기 생성 | 미실행 |
-| PowerShell AST 구문 검사 | Windows CI에 추가, 미실행 |
-| 동일 payload 해시·설치 버전 검사 | 스크립트 작성, 미실행 |
-| 실행 중 재설치/제거, 설정 보존 | 스크립트 작성, 미실행 |
-| 이전 PowerShell 등록/자동 시작 정리 | fixture 검사 작성, 미실행 |
+| release 실행 파일·Inno 설치기 생성 | Windows CI 통과 |
+| PowerShell AST 구문 검사 | Windows CI 통과 |
+| 동일 payload 해시·설치 버전 검사 | Windows CI 통과, 다운로드 후 SHA-256 재확인 |
+| 실행 중 재설치/제거, 설정 보존 | Windows CI 통과 |
+| 이전 PowerShell 등록/자동 시작 정리 | Windows CI fixture 통과 |
 | 실제 이전 공개 버전에서 업그레이드 | 미실행, fixture와 구분 |
 | 자동 시작/재부팅 | 미실행 |
-| CPU/working set | 측정 스크립트 작성, 수치 없음 |
+| CPU/working set | hosted Windows 유휴 30초 표본 기록, 아래 참고 |
 | 프레임 시간/GPU 메모리/시각적 외형/IME | 미측정·미검증 |
 | 코드 서명 | 없음 |
 
@@ -132,3 +132,20 @@ native smoke는 실제 DWM 등록/속성 갱신과 축소 HWND 크기를 검사�
 각 조건에서 화면 해상도/배율·모니터 수·핀 수·검색어·옵션 활성화 여부·정확한 동작을 함께 기록한다. warm-up 후 유휴 측정 중에는 마우스를 Dock 밖에 둔다. 애니메이션은 반복 hover/launch, 검색은 반복 열기/입력/결과 전환 조건을 기록한다. 스크립트는 실제 상호작용을 감지하지 않으므로 결과의 `interaction_confirmed:false`를 보고 조건을 직접 확인한다.
 
 CPU는 단일 코어 기준과 논리 프로세서 수로 나눈 전체 머신 기준을 모두 기록한다. 메모리는 250ms 간격 프로세스 working set 평균/최대 표본이며 전체 GPU 메모리나 private bytes로 해석하지 않는다. 이 수치로 FPS를 추정하지 않는다. 프레임 간격·긴 프레임·표시 지연은 별도 Windows 프레임 캡처의 원본 기록을 첨부하고 측정 도구/이벤트 의미를 기재한다. 아직 측정하지 않은 프레임 시간은 `not-measured`로 남긴다.
+
+
+## 2026-11-12 KST 최초 Windows CI 성공
+
+[실행 43045554382](https://github.com/yubin0210/mac-windows-launcher/actions/runs/43045554382), 소스 `5e9bd9d9e144c3c8ba8673d9ae7b6a8258c0cb7e`, 버전 `1.1.0-alpha.1`. 환경: GitHub hosted **Windows Server 2025** (`windows-2025-vs2026`, NT 10.0.26100), 논리 CPU 4개, Microsoft Hyper-V Video 드라이버 10.0.26100.1150, Rust 1.99.1, Inno Setup 6.7.1. Windows 10/11 실사용 PC 검증 결과로 해석하지 않는다.
+
+- MSVC release workspace **204개**, 명시적 native smoke **8개** 통과.
+- PowerShell AST, 동일 release exe 버전/해시, Inno 컴파일, 실제 새 설치 통과.
+- 메뉴바·Stage 활성화 상태의 실제 런처 기동/정상 종료와 실행 중 재설치·제거 통과.
+- 설정 보존, 자동 시작 선택/해제, 구형 등록 fixture 정리, 다른 앱 바로가기 및 설치 폴더 내 사용자 파일 보존 통과.
+- 다운로드한 설치기/exe 해시를 manifest와 다시 대조했다. `source_dirty:false`, `unit_tests/native_api_smoke/installer_lifecycle/runtime_startup_smoke/legacy_migration_fixture:passed`.
+
+이 과정에서 실제 실패 두 가지를 수정하고 재실행했다. 창 생성의 초기 Paint를 합성 큐 테스트가 입력 이벤트로 세던 문제는 주입 전에 초기 메시지를 비워 해결했다. RUNNER~1 짧은 경로와 바로가기의 긴 경로가 달라 자동 시작 opt-out에 실패하던 문제는 GetLongPathNameW로 기존 경로를 정규화해 해결했다. [Windows API 근거](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getlongpathnamew).
+
+유휴 fixture 표본은 빈 고정 목록, 메뉴바/Stage 켜짐, `--smoke-test --wait-for-quit` 상태다. 30.16초/119개 표본에서 단일 코어 기준 CPU **0.207%**, 전체 머신 기준 **0.052%**, working set 평균 **46.1 MiB**, 최대 표본 **46.3 MiB**였다. 실제 hover/검색 입력은 하지 않았다(`interaction_confirmed:false`). 단일 가상 환경 표본이며 성능 보장·FPS·GPU 메모리 수치로 사용하지 않는다. 초기 성공 빌드의 exe SHA-256은 `b12d6f0b54dfdf40aa2c303415fd1a3d65480df38aee69d13e38a8e23815aa00`이며 이후 빌드는 각 manifest 해시로 식별한다.
+
+화면 외형·한국어 IME·실제 Explorer 재시작·다중 모니터·절전 복귀·장치 손실·재부팅·이전 공개 바이너리에서 업그레이드·애니메이션/검색 성능 및 프레임 시간은 여전히 확인하지 않았다. 이 CI 성공으로 해당 체크박스를 완료 처리하지 않는다. 서명 없는 프리뷰 artifact이며 정식 Release는 발행하지 않았다.

@@ -48,3 +48,8 @@ scripts/measure-process.ps1은 명시 PID/실행 경로의 CPU/working set만 �
 최종 검토의 두 번째 수정: Dock가 TaskbarCreated 등록 메시지를 WindowEvent::ShellRestarted로 전달하고 런타임이 TrayIcon::readd를 호출한다. Explorer가 재시작돼도 트레이를 다시 등록하며 실패를 보고한다. native smoke는 test-owned 아이콘 제거 후 알림 주입/재등록 경로를 검사한다. 실제 Explorer 재시작 검증은 대기다.
 
 6단계 로컬 최종 검증: cargo test --workspace --locked 211 passed/0 failed; cargo check --target x86_64-pc-windows-gnu -p win-launcher --all-targets --locked exit0/no warnings; git diff --check exit0; Ruby YAML parser로 두 workflow 구문 확인. PowerShell AST/Inno/native Windows 실행은 미실행. 변경은 feat/launcher-rebuild의 미커밋 상태이며 공개 배포/원격 push는 하지 않았다.
+
+
+2026-11-12 KST 원격 검증: 사용자가 커밋·푸시·Actions 실행을 명시 승인. feat/launcher-rebuild에 1db8766(재구현), a4135bb(실제 HWND 초기 Paint를 queue 주입 전에 drain), 5e9bd9d(GetLongPathNameW로 8.3/긴 경로 비교 및 안전한 바로가기/파일 보존) 푸시. 세 번째 실행43045554382 성공, Windows Server2025/Hyper-V에서 MSVC workspace204 + native8 통과, Inno6.7.1 컴파일과 실제 설치/기동/실행 중 재설치/제거·설정 보존·자동 시작 on/off·legacy fixture·타 앱 바로가기·사용자 추가 파일 보존 통과. 다운로드한 exe/Setup은 manifest SHA256 재확인했다. 첫 실패는 startup Paint test, 다음 실패는 short/long startup shortcut path mismatch였고 같은 검사로 수정 후 통과했다.
+
+실제 Windows10/11 외형·IME·모니터·Explorer restart·재부팅·이전 공개 바이너리 업그레이드·프레임 시간은 여전히 미검증이다. CI server/API 성공을 실사용 완성으로 주장하지 않는다. hosted idle fixture 표본(빈 핀/menu+stage on/30.16s): CPU단일코어0.207%, 전체머신0.052%, working set평균46.1MiB. 성능 보장이나 FPS가 아니다. 정식Release/merge는 하지 않았다. 이 아래 최신 원격 기록이 이전 미실행/미커밋 상태 설명보다 우선한다.

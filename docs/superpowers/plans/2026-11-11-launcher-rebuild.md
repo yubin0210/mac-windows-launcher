@@ -95,6 +95,6 @@ Interfaces: Cargo version -> binary/Setup/manifest; same-path shutdown -> WM_CLO
 - [x] 수동 preview workflow, contents:read, 성공 패키지/실패 로그 artifact. 태그 자동 정식 발행 제거.
 - [x] Dock DComp host의 초기화 없는 layered 스타일 제거 및 native 회귀 assertion 추가. Windows 실행은 대기.
 - [x] Explorer TaskbarCreated를 Dock 이벤트로 전달하고 트레이 재등록/실패 보고, native 알림 주입 검사 작성. 실제 재시작 확인 대기.
-- [ ] Windows에서 PowerShell AST/Inno 컴파일/실제 설치·실행·재설치·제거 테스트 및 로그 확인.
+- [x] Windows CI(Server 2025/Hyper-V)에서 PowerShell AST/Inno 컴파일/실제 설치·실행·재설치·제거 통과. 204 workspace +8 native, 실행43045554382. Windows10/11 실기 외형/입력과 구분.
 - [ ] 실제 이전 버전 업그레이드/자동 시작 후 재부팅, 애니메이션·검색 CPU/RAM/프레임 측정과 UI 검증 기록.
 - [ ] 최종 Windows 실기 검증 전 공개 배포하지 않는다.

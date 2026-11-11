@@ -37,7 +37,7 @@ Cargo의 버전을 읽어 바이너리·설치 표시 버전·PE 숫자 버전�
 
 검증 로그는 `target\validation-logs`입니다. 설치 검사는 새 설치, 설정 보존, 실행 중 같은 버전 재설치, 자동 시작 선택/해제, 실행 중 제거와 이전 등록 fixture를 검사합니다. 메뉴바·Stage를 켠 런처를 실제 기동하고 첫 composed frame 및 종료 보고서를 확인하며 유휴 CPU/working set을 30초 표본 측정합니다. 기존 설치·설정·실행 중 프로세스가 있으면 시작을 거부합니다. 성공 후에도 검사 계정에 남은 로그·설정은 검토를 위해 보존하므로 다음 검사는 새 계정에서 실행합니다.
 
-`.github/workflows/release.yml`의 **Windows Preview Package**는 수동 실행만 지원하고 검증된 패키지와 로그를 Actions artifact로 올립니다. 정식 GitHub Release를 자동 발행하지 않습니다. 이 작업 세션에서는 Windows 워크플로·Inno 컴파일·설치 검사를 실행하지 못했습니다. 생성할 패키지는 서명되지 않은 프리뷰입니다.
+`.github/workflows/release.yml`의 **Windows Preview Package**는 수동 실행만 지원하고 검증된 패키지와 로그를 Actions artifact로 올립니다. 정식 GitHub Release를 자동 발행하지 않습니다. 실제 실행 결과는 해당 artifact의 build-manifest.json과 검증 로그에서 확인합니다. 2026-11-12 KST 첫 Windows CI 성공 기록은 [검증 문서](../docs/windows-validation.md)에 있습니다. 생성할 패키지는 서명되지 않은 프리뷰입니다.
 
 성능의 애니메이션·검색 조건, 프레임 시간, 실제 한글 IME·다중 모니터·재부팅 검증은 [Windows 검증 기록](../docs/windows-validation.md)에 별도로 기록합니다. API smoke 통과와 CPU 표본만으로 외형·FPS를 보증하지 않습니다.
 
