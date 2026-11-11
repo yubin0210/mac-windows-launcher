@@ -238,6 +238,10 @@ fn test_dock_window_cross_platform_event_queue() {
     assert!(window.is_open());
     assert_eq!(window.config(), &config);
 
+    // A real HWND queues its initial Paint during creation. Start the injection
+    // assertion after those legitimate native startup events have been drained.
+    let _ = window.poll_events();
+
     window.queue_event(WindowEvent::MouseMove { x: 500.0, y: 150.0 });
     window.queue_event(WindowEvent::MouseClick { x: 500.0, y: 150.0 });
     window.queue_event(WindowEvent::MouseLeave);
