@@ -61,3 +61,52 @@ pub use window::{DockWindow, DockWindowConfig, WindowEvent};
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+pub mod diagnostics;
+#[cfg(windows)]
+pub mod runtime;
+
+#[cfg(windows)]
+pub mod native_tray;
+
+pub mod app_catalog;
+pub mod settings;
+
+pub mod icon_cache;
+
+pub mod display;
+
+#[cfg(windows)]
+pub mod dock_menu;
+
+pub mod dock_session;
+
+#[cfg(windows)]
+mod shell_identity;
+
+pub mod spotlight_layout;
+pub mod clipboard;
+
+#[cfg(windows)]
+pub mod spotlight_native;
+
+#[cfg(windows)]
+pub mod spotlight_controller;
+
+pub mod menu_bar_model;
+
+#[cfg(windows)]
+pub mod menu_bar_native;
+
+pub mod stage_model;
+
+#[cfg(windows)]
+pub mod stage_native;
+
+pub mod stage_actions;
+
+#[cfg(windows)]
+mod stage_events;
+
+#[cfg(windows)]
+pub mod shutdown;

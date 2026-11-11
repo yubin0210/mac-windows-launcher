@@ -5,6 +5,7 @@ use win_launcher::process_launcher::{
 };
 
 #[test]
+#[cfg(not(windows))] // Simulation tests must not launch or activate unrelated Windows apps.
 fn test_process_launcher_activates_running_app_first() {
     let mut tracker = AppTracker::new();
     tracker.register_mock_running_app("notepad.exe", 5001, false);
@@ -26,6 +27,7 @@ fn test_process_launcher_activates_running_app_first() {
 }
 
 #[test]
+#[cfg(not(windows))] // Simulation tests must not launch or activate unrelated Windows apps.
 fn test_process_launcher_launches_non_running_app() {
     let tracker = AppTracker::new();
 
@@ -45,6 +47,7 @@ fn test_process_launcher_launches_non_running_app() {
 }
 
 #[test]
+#[cfg(not(windows))] // Simulation tests must not launch or activate unrelated Windows apps.
 fn test_process_launcher_protocol_uri() {
     let tracker = AppTracker::new();
     let target = LaunchTarget::ProtocolUri("ms-settings:".to_string());
@@ -59,6 +62,7 @@ fn test_process_launcher_protocol_uri() {
 }
 
 #[test]
+#[cfg(not(windows))] // Simulation tests must not launch or activate unrelated Windows apps.
 fn test_process_launcher_shell_action() {
     let tracker = AppTracker::new();
     let target = LaunchTarget::ShellAction("powershell".to_string());
@@ -134,6 +138,7 @@ fn test_format_arguments_quoting_whitespace() {
 }
 
 #[test]
+#[cfg(not(windows))] // Simulation tests must not launch or activate unrelated Windows apps.
 fn test_process_launcher_names_match_tolerance() {
     let mut tracker = AppTracker::new();
     tracker.register_mock_running_app("C:\\Windows\\System32\\notepad.exe", 7001, false);
@@ -230,6 +235,7 @@ fn test_launch_target_convenience_constructors() {
 }
 
 #[test]
+#[cfg(not(windows))] // Simulation tests must not launch or activate unrelated Windows apps.
 fn test_process_launcher_explicit_hwnd_activation() {
     let mut tracker = AppTracker::new();
     tracker.register_mock_running_app_with_hwnd("notepad.exe", 5001, false, 0x12345678);
@@ -265,4 +271,10 @@ fn test_process_launcher_empty_protocol_and_shell_fail() {
         }
         other => panic!("Expected failure for empty shell action, got {other:?}"),
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn native_activation_rejects_an_invalid_window() {
+    assert!(ProcessLauncher::activate_window(0, 0).is_err());
 }

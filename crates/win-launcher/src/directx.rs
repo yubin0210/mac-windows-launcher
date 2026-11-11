@@ -63,6 +63,18 @@ impl From<windows::core::Error> for RenderError {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn upload_icon(context: &ID2D1DeviceContext, pixels: &crate::icon_cache::IconPixels) -> Result<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1, RenderError> {
+    use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE};
+    use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_U, D2D1_PIXEL_FORMAT, D2D1_ALPHA_MODE_PREMULTIPLIED};
+    let properties = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+        dpiX: 96.0, dpiY: 96.0, bitmapOptions: D2D1_BITMAP_OPTIONS_NONE, ..Default::default()
+    };
+    let bitmap = unsafe { context.CreateBitmap(D2D_SIZE_U { width: pixels.width, height: pixels.height }, Some(pixels.bgra.as_ptr() as *const core::ffi::c_void), pixels.width * 4, &properties)? };
+    Ok(bitmap)
+}
+
 /// Container for cached Direct2D solid color brushes to eliminate COM allocation in the 120Hz render loop.
 #[cfg(windows)]
 pub struct CachedBrushes {
@@ -236,6 +248,8 @@ pub struct Direct2DRenderer {
     width: u32,
     height: u32,
     cached_brushes: Option<CachedBrushes>,
+    icons: std::collections::HashMap<String, windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>,
+    fallback_text: windows::Win32::Graphics::DirectWrite::IDWriteTextFormat,
 }
 
 #[cfg(windows)]
@@ -270,7 +284,30 @@ impl Direct2DRenderer {
             width,
             height,
             cached_brushes: None,
+            icons: std::collections::HashMap::new(),
+            fallback_text: {
+                use windows::Win32::Graphics::DirectWrite::*;
+                let factory: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+                let format = unsafe { factory.CreateTextFormat(windows::core::w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0, windows::core::w!(""))? };
+                unsafe { format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?; format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?; }
+                format
+            },
         })
+    }
+
+    pub fn set_icon(&mut self, id: &str, pixels: &crate::icon_cache::IconPixels) -> Result<(), RenderError> {
+        let bitmap = upload_icon(&self.d2d_context, pixels)?;
+        self.icons.insert(id.to_string(), bitmap);
+        Ok(())
+    }
+    pub fn retain_icons(&mut self, ids: &[String]) { self.icons.retain(|id, _| ids.contains(id)); }
+    pub fn resize(&mut self, pipeline: &DirectCompositionPipeline, width: u32, height: u32) -> Result<(), RenderError> {
+        let surface = unsafe { pipeline.dcomp_device().CreateSurface(width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)? };
+        unsafe { pipeline.root_visual().SetContent(&surface)?; }
+        self.surface = surface;
+        self.width = width;
+        self.height = height;
+        Ok(())
     }
 
     /// Creates a `Direct2DRenderer` bound to the DirectComposition pipeline visual and surface.
@@ -400,6 +437,12 @@ impl Direct2DRenderer {
                 }
             }
 
+            if render_items.is_empty() {
+                let hint: Vec<u16> = "Right-click to add apps".encode_utf16().collect();
+                let bounds = D2D_RECT_F { left: tx + ox, top: ty + oy, right: tx + tw + ox, bottom: ty + th + oy };
+                unsafe { draw_dc.DrawText(&hint, &self.fallback_text, &bounds, &brushes.running_pip, windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL); }
+            }
+
             // 3. Render dock icon bounding squircles
             for item in render_items {
                 let half = item.current_size / 2.0;
@@ -416,8 +459,24 @@ impl Direct2DRenderer {
                 };
 
                 unsafe {
-                    draw_dc.FillRoundedRectangle(&rounded_rect, &brushes.icon_fill);
-                    draw_dc.DrawRoundedRectangle(&rounded_rect, &brushes.icon_stroke, 1.0, None);
+                    if let Some(bitmap) = self.icons.get(&item.id) {
+                        let size = bitmap.GetSize();
+                        let ratio = (item.current_size / size.width).min(item.current_size / size.height);
+                        let width = size.width * ratio;
+                        let height = size.height * ratio;
+                        let destination = D2D_RECT_F {
+                            left: item.center_x + ox - width / 2.0,
+                            top: item.center_y + oy - height / 2.0,
+                            right: item.center_x + ox + width / 2.0,
+                            bottom: item.center_y + oy + height / 2.0,
+                        };
+                        draw_dc.DrawBitmap(bitmap, Some(&destination), 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+                    } else {
+                        draw_dc.FillRoundedRectangle(&rounded_rect, &brushes.icon_fill);
+                        draw_dc.DrawRoundedRectangle(&rounded_rect, &brushes.icon_stroke, 1.0, None);
+                        let initials: Vec<u16> = item.label.chars().take(2).collect::<String>().encode_utf16().collect();
+                        draw_dc.DrawText(&initials, &self.fallback_text, &rounded_rect.rect, &brushes.running_pip, windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_CLIP, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
+                    }
                 }
             }
 
@@ -569,6 +628,19 @@ impl DirectCompositionPipeline {
             dcomp_device,
             target,
             root_visual,
+        })
+    }
+
+    /// Attach a second HWND to the same GPU/composition devices. Child input controls
+    /// stay above the visual tree when `above_children` is false.
+    pub fn for_window(&self, hwnd: HWND, above_children: bool) -> windows::core::Result<Self> {
+        let target = unsafe { self.dcomp_device.CreateTargetForHwnd(hwnd, above_children)? };
+        let root_visual = unsafe { self.dcomp_device.CreateVisual()? };
+        unsafe { target.SetRoot(&root_visual)?; self.dcomp_device.Commit()?; }
+        Ok(Self {
+            d3d_device: self.d3d_device.clone(), d3d_context: self.d3d_context.clone(),
+            dxgi_device: self.dxgi_device.clone(), d2d_factory: self.d2d_factory.clone(),
+            d2d_device: self.d2d_device.clone(), dcomp_device: self.dcomp_device.clone(), target, root_visual,
         })
     }
 

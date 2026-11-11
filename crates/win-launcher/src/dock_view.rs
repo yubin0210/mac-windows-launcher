@@ -256,7 +256,7 @@ impl DockView {
     pub fn resting_tray_geometry(&self) -> (f32, f32, f32, f32) {
         let n = self.items.len() as f32;
         if n == 0.0 {
-            let width = self.config.tray_padding_x * 2.0;
+            let width = (self.config.magnification.base_size * 4.5).min(self.config.window_width - 16.0).max(self.config.tray_padding_x * 2.0);
             let height = self.config.magnification.base_size + self.config.tray_padding_y * 2.0;
             let x = self.config.dock_anchor_x - width / 2.0;
             let y = self.config.dock_baseline_y - self.config.magnification.base_size
@@ -474,7 +474,7 @@ impl DockView {
     pub fn get_tray_geometry(&self) -> (f32, f32, f32, f32) {
         let n = self.items.len();
         if n == 0 {
-            let width = self.config.tray_padding_x * 2.0;
+            let width = (self.config.magnification.base_size * 4.5).min(self.config.window_width - 16.0).max(self.config.tray_padding_x * 2.0);
             let height = self.config.magnification.base_size + self.config.tray_padding_y * 2.0;
             let x = self.config.dock_anchor_x - width / 2.0;
             let y = self.config.dock_baseline_y - self.config.magnification.base_size

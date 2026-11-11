@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test-and-check:
     name: Test Workspace & Windows Cross-Check
@@ -24,7 +27,19 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Workspace Tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Build win-launcher (Dev)
-        run: cargo build -p win-launcher
+        run: cargo build --locked -p win-launcher
+
+      - name: Native DirectComposition smoke (not visual validation)
+        run: cargo test --locked -p win-launcher --test test_native_backend -- --ignored --nocapture --test-threads=1
+
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts,installer -Filter *.ps1 -Recurse | ForEach-Object {
+            $tokens = $null; $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }

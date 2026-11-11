@@ -9,10 +9,13 @@ use serde::{Deserialize, Serialize};
 /// Information regarding a detected or mock running application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppInfo {
+    /// Native observations retain the full executable path; legacy mocks may use a basename.
     pub process_name: String,
     pub pid: u32,
     pub is_focused: bool,
     pub hwnd: usize,
+    #[serde(default)]
+    pub app_id: Option<String>,
 }
 
 /// Tracks active processes and windows, identifying running apps and foreground focus.
@@ -49,7 +52,13 @@ impl AppTracker {
             pid,
             is_focused,
             hwnd,
+            app_id: None,
         });
+    }
+
+    pub fn register_mock_running_app_with_app_id(&mut self, process_name: &str, pid: u32, focused: bool, app_id: &str) {
+        self.register_mock_running_app(process_name, pid, focused);
+        if let Some(app) = self.mock_apps.last_mut() { app.app_id = Some(app_id.into()); }
     }
 
     /// Clears any registered mock applications.
@@ -119,6 +128,9 @@ impl AppTracker {
 /// Matches executable names case-insensitively, tolerating presence or absence of `.exe`
 /// and full directory path prefixes (e.g. `C:\Windows\notepad.exe` matches `notepad.exe`).
 pub(crate) fn names_match(registered_or_running: &str, query: &str) -> bool {
+    if registered_or_running.contains(['\\', '/']) && query.contains(['\\', '/']) {
+        return registered_or_running.replace('/', "\\").eq_ignore_ascii_case(&query.replace('/', "\\"));
+    }
     fn extract_basename(s: &str) -> &str {
         let trimmed = s.trim();
         // Handle both Windows backslash and Unix forward slash path separators
@@ -146,7 +158,6 @@ pub(crate) fn names_match(registered_or_running: &str, query: &str) -> bool {
 #[cfg(windows)]
 mod win32_tracker {
     use super::AppInfo;
-    use std::path::Path;
     use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, RECT};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
@@ -160,19 +171,8 @@ mod win32_tracker {
     pub fn enumerate_running_windows() -> Vec<AppInfo> {
         let apps = Vec::new();
         let fg_hwnd = unsafe { GetForegroundWindow() };
-        let mut fg_pid = 0u32;
-        if fg_hwnd.0 != std::ptr::null_mut() {
-            unsafe {
-                GetWindowThreadProcessId(fg_hwnd, Some(&mut fg_pid));
-            }
-        }
-
-        struct Context {
-            apps: Vec<AppInfo>,
-            fg_pid: u32,
-        }
-
-        let mut context = Context { apps, fg_pid };
+        struct Context { apps: Vec<AppInfo>, foreground: usize }
+        let mut context = Context { apps, foreground: fg_hwnd.0 as usize };
 
         unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let ctx = unsafe { &mut *(lparam.0 as *mut Context) };
@@ -198,6 +198,19 @@ mod win32_tracker {
                 return BOOL(1);
             }
 
+            // Shell desktop and cloaked virtual-desktop windows are not launchable app windows.
+            let mut class = [0u16; 128];
+            let length = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class);
+            let class = String::from_utf16_lossy(&class[..length.max(0) as usize]);
+            if ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"].contains(&class.as_str()) {
+                return BOOL(1);
+            }
+            let mut cloaked = 0u32;
+            if windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(hwnd, windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut core::ffi::c_void, std::mem::size_of::<u32>() as u32).is_ok() && cloaked != 0 {
+                return BOOL(1);
+            }
+
             let mut pid = 0u32;
             unsafe {
                 GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -206,7 +219,7 @@ mod win32_tracker {
                 return BOOL(1);
             }
 
-            let is_focused = pid == ctx.fg_pid;
+            let is_focused = hwnd.0 as usize == ctx.foreground;
 
             // Query process executable image name
             if let Ok(handle) = unsafe {
@@ -225,13 +238,11 @@ mod win32_tracker {
 
                 if query_res.is_ok() && size > 0 {
                     let path_str = String::from_utf16_lossy(&buf[..size as usize]);
-                    let process_name = Path::new(&path_str)
-                        .file_name()
-                        .and_then(|f| f.to_str())
-                        .unwrap_or(&path_str)
-                        .to_string();
+                    let process_name = path_str;
 
+                    let app_id = crate::shell_identity::window_app_id(hwnd, handle);
                     ctx.apps.push(AppInfo {
+                        app_id,
                         process_name,
                         pid,
                         is_focused,

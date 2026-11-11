@@ -1,50 +1,13 @@
-# macOS System Launcher for Windows - Clean Uninstaller
-
+# Settings/logs are preserved. Inno Setup owns executable and shortcut removal.
 [CmdletBinding()]
-param ()
-
-$ErrorActionPreference = "Continue"
-
-Write-Host "============================================================" -ForegroundColor Yellow
-Write-Host " macOS System Launcher - Uninstaller" -ForegroundColor Yellow
-Write-Host "============================================================" -ForegroundColor Yellow
-Write-Host ""
-
-$AppName = "macOS System Launcher"
-$InstallDir = Join-Path $env:LOCALAPPDATA "Programs\MacLauncher"
-
-# 1. Terminate running instances
-Write-Host "[1/4] Closing running instances of win-launcher..." -ForegroundColor Yellow
-Get-Process -Name "win-launcher" -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 500
-
-# 2. Remove shortcuts
-Write-Host "[2/4] Removing Desktop, Start Menu, and Startup shortcuts..." -ForegroundColor Yellow
-
-$DesktopShortcut = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)) "$AppName.lnk"
-if (Test-Path $DesktopShortcut) { Remove-Item $DesktopShortcut -Force }
-
-$StartMenuDir = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)) $AppName
-if (Test-Path $StartMenuDir) { Remove-Item $StartMenuDir -Recurse -Force }
-
-$StartupShortcut = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)) "$AppName.lnk"
-if (Test-Path $StartupShortcut) { Remove-Item $StartupShortcut -Force }
-
-# 3. Remove Windows Settings Uninstall Registration
-Write-Host "[3/4] Removing Windows Add/Remove programs registry keys..." -ForegroundColor Yellow
-$RegPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MacLauncher"
-if (Test-Path $RegPath) {
-    Remove-Item -Path $RegPath -Recurse -Force
-}
-
-# 4. Remove installation files
-Write-Host "[4/4] Cleaning up installation folder..." -ForegroundColor Yellow
-if (Test-Path $InstallDir) {
-    # Remove files except this running uninstall script if run from there
-    Get-ChildItem -Path $InstallDir -Exclude "uninstall.ps1", "uninstall.bat" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-Write-Host ""
-Write-Host "macOS System Launcher has been completely uninstalled from your computer." -ForegroundColor Green
-Write-Host ""
-Start-Sleep -Seconds 2
+param([switch]$Silent)
+$ErrorActionPreference = 'Stop'
+$Key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{D37E84B1-29FB-4E4A-B829-57DFB0E5A73C}_is1'
+if (-not (Test-Path -LiteralPath $Key)) { throw 'This installer registration was not found. Use Windows Installed Apps for a legacy installation.' }
+$Command = (Get-ItemProperty -LiteralPath $Key).UninstallString
+$Executable = $Command.Trim('"')
+if (-not [IO.Path]::IsPathRooted($Executable) -or -not (Test-Path -LiteralPath $Executable -PathType Leaf)) { throw 'The registered Inno uninstaller is missing or invalid.' }
+$Arguments = @('/NORESTART')
+if ($Silent) { $Arguments += @('/VERYSILENT','/SUPPRESSMSGBOXES') }
+$Result = Start-Process -FilePath $Executable -ArgumentList $Arguments -Wait -PassThru
+exit $Result.ExitCode

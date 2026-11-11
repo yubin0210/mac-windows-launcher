@@ -278,3 +278,10 @@ fn test_mouse_leave_smooth_scale_decay() {
     assert!((items_settled[5].scale - 1.0).abs() < 1e-3);
 }
 
+
+#[test]
+fn empty_dock_retains_a_visible_context_menu_target() {
+    let dock = DockView::with_items(vec![]);
+    assert!(dock.get_tray_geometry().2 >= 200.0);
+    assert_eq!(dock.get_tray_geometry(), dock.resting_tray_geometry());
+}

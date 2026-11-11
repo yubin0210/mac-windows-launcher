@@ -223,3 +223,30 @@ fn format_mock_time() -> String {
 
     format!("Thu Nov 5 {}:{:02} {}", hour_12, minute, am_pm)
 }
+
+/// Production status uses explicit unknowns rather than legacy demonstration values.
+#[cfg(windows)]
+pub fn read_menu_status() -> crate::menu_bar_model::BarStatus {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
+    use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eRender, eConsole};
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    let mut status = crate::menu_bar_model::BarStatus { clock: SystemStatusTracker::format_clock(), ..Default::default() };
+    unsafe {
+        let mut power = SYSTEM_POWER_STATUS::default();
+        if GetSystemPowerStatus(&mut power).is_ok() && power.BatteryFlag != 255 && power.BatteryFlag & 128 == 0 && power.BatteryLifePercent <= 100 {
+            status.battery = Some((power.BatteryLifePercent, power.BatteryFlag & 8 != 0));
+        }
+        let audio = (|| -> windows::core::Result<IAudioEndpointVolume> {
+            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let endpoint = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+            let volume: IAudioEndpointVolume = endpoint.Activate(CLSCTX_ALL, None)?;
+            Ok(volume)
+        })();
+        if let Ok(volume) = audio {
+            status.volume = volume.GetMasterVolumeLevelScalar().ok().filter(|value| value.is_finite()).map(|value| (value.clamp(0.0,1.0)*100.0).round() as u8);
+            status.muted = volume.GetMute().ok().map(|value| value.as_bool());
+        }
+    }
+    status
+}

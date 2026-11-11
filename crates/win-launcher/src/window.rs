@@ -1,5 +1,5 @@
 //! window
-//! Win32 layered topmost window and cross-platform message pump.
+//! Win32 DirectComposition topmost window and cross-platform message pump.
 
 use std::collections::VecDeque;
 
@@ -8,6 +8,11 @@ use std::collections::VecDeque;
 pub enum WindowEvent {
     MouseMove { x: f32, y: f32 },
     MouseLeave,
+    ContextMenu { x: f32, y: f32 },
+    Scroll(i32),
+    DisplayChanged,
+    OpenSpotlight,
+    ShellRestarted,
     MouseClick { x: f32, y: f32 },
     Paint,
     Destroy,
@@ -34,7 +39,7 @@ impl Default for DockWindowConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Windows Implementation (DirectComposition Layered Topmost Window)
+// Windows Implementation (DirectComposition Topmost Window)
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
@@ -48,16 +53,18 @@ mod win32 {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetSystemMetrics,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
         GetWindowLongPtrW, PeekMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW,
         ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, MSG, PM_REMOVE,
-        SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WNDCLASSEXW, WS_EX_LAYERED,
-        WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        WNDCLASSEXW,
+        WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_NOACTIVATE, WS_POPUP, SW_SHOWNOACTIVATE,
     };
 
     struct WindowSharedState {
         events: Mutex<VecDeque<WindowEvent>>,
         is_tracking_leave: Mutex<bool>,
+        hit_regions: Mutex<Vec<(f32, f32, f32, f32)>>,
+        taskbar_message: u32,
     }
 
     pub struct Win32DockWindow {
@@ -85,7 +92,33 @@ mod win32 {
 
         let state = &*ptr;
 
+        if msg == state.taskbar_message {
+            if let Ok(mut events) = state.events.lock() { events.push_back(WindowEvent::ShellRestarted); }
+            return LRESULT(0);
+        }
+
         match msg {
+            crate::native_tray::OPEN_SPOTLIGHT_MESSAGE => {
+                if let Ok(mut events) = state.events.lock() { events.push_back(WindowEvent::OpenSpotlight); }
+                LRESULT(0)
+            }
+            crate::native_tray::TRAY_MESSAGE => {
+                if lparam.0 as u32 == windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP {
+                    crate::native_tray::show_menu(hwnd);
+                }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_NCHITTEST => {
+                let mut point = windows::Win32::Foundation::POINT {
+                    x: (lparam.0 & 0xFFFF) as i16 as i32,
+                    y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+                };
+                let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+                let hit = state.hit_regions.lock().map(|regions| regions.iter().any(|&(x, y, w, h)| {
+                    point.x as f32 >= x && point.y as f32 >= y && (point.x as f32) < x+w && (point.y as f32) < y+h
+                })).unwrap_or(false);
+                LRESULT(if hit { 1 } else { -1 })
+            }
             WM_MOUSEMOVE => {
                 let x = (lparam.0 & 0xFFFF) as i16 as f32;
                 let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
@@ -116,6 +149,22 @@ mod win32 {
                 if let Ok(mut events) = state.events.lock() {
                     events.push_back(WindowEvent::MouseLeave);
                 }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONUP => {
+                if let Ok(mut events) = state.events.lock() {
+                    events.push_back(WindowEvent::ContextMenu { x: (lparam.0 & 0xFFFF) as i16 as f32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 });
+                }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
+                if let Ok(mut events) = state.events.lock() { events.push_back(WindowEvent::Scroll((wparam.0 >> 16) as i16 as i32)); }
+                LRESULT(0)
+            }
+            windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED |
+            windows::Win32::UI::WindowsAndMessaging::WM_DISPLAYCHANGE |
+            windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE => {
+                if let Ok(mut events) = state.events.lock() { events.push_back(WindowEvent::DisplayChanged); }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -182,23 +231,35 @@ mod win32 {
                 RegisterClassExW(&wcex);
             }
 
-            // Calculate bottom-centered positioning on primary monitor
-            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+            // Use the available desktop area so the visible Windows taskbar
+            // does not cover the Dock. Multi-monitor selection is handled later.
+            let mut work_area = windows::Win32::Foundation::RECT::default();
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+                    windows::Win32::UI::WindowsAndMessaging::SPI_GETWORKAREA,
+                    0,
+                    Some(&mut work_area as *mut _ as *mut core::ffi::c_void),
+                    windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                )?;
+            }
+            let pos_x = work_area.left + (work_area.right - work_area.left - config.width) / 2;
+            let pos_y = work_area.bottom - config.height;
 
-            let pos_x = (screen_w - config.width) / 2;
-            let pos_y = screen_h - config.height;
-
-            // DirectComposition layered window extended styles
+            // DirectComposition supplies alpha. WS_EX_LAYERED would also require
+            // SetLayeredWindowAttributes/UpdateLayeredWindow before becoming visible.
             let ex_style = WS_EX_NOREDIRECTIONBITMAP
                 | WS_EX_TOPMOST
                 | WS_EX_TOOLWINDOW
-                | WS_EX_LAYERED;
+                | WS_EX_NOACTIVATE;
             let style = WS_POPUP;
 
+            let taskbar_message = unsafe { windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(windows::core::w!("TaskbarCreated")) };
+            if taskbar_message == 0 { return Err(windows::core::Error::from_win32()); }
             let shared_state = Arc::new(WindowSharedState {
                 events: Mutex::new(VecDeque::new()),
                 is_tracking_leave: Mutex::new(false),
+                hit_regions: Mutex::new(Vec::new()),
+                taskbar_message,
             });
 
             let hwnd = unsafe {
@@ -222,7 +283,7 @@ mod win32 {
             let raw_state = Arc::as_ptr(&shared_state) as isize;
             unsafe {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw_state);
-                let _ = ShowWindow(hwnd, SW_SHOW);
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let _ = UpdateWindow(hwnd);
             }
 
@@ -237,7 +298,11 @@ mod win32 {
         pub fn poll_events(&mut self) -> Vec<WindowEvent> {
             let mut msg = MSG::default();
             unsafe {
-                while PeekMessageW(&mut msg, self.hwnd, 0, 0, PM_REMOVE).as_bool() {
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    if msg.message == windows::Win32::UI::WindowsAndMessaging::WM_QUIT {
+                        self.is_open = false;
+                        break;
+                    }
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -260,6 +325,37 @@ mod win32 {
             unsafe {
                 let _ = DwmFlush();
             }
+        }
+
+        pub fn place(&mut self, placement: &crate::display::DockPlacement) -> Result<(), String> {
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::SetWindowPos(self.hwnd, None, placement.x, placement.y, placement.width, placement.height,
+                    windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER).map_err(|e| e.to_string())?;
+            }
+            self.config.width = placement.width;
+            self.config.height = placement.height;
+            Ok(())
+        }
+
+        pub fn set_hit_regions(&self, regions: Vec<(f32, f32, f32, f32)>) {
+            // A native window region also passes input to windows in other processes.
+            // HTTRANSPARENT alone only forwards hit testing within the same thread.
+            unsafe {
+                use windows::Win32::Graphics::Gdi::{CreateRectRgn, CombineRgn, DeleteObject, SetWindowRgn, RGN_OR};
+                let region = CreateRectRgn(0, 0, 0, 0);
+                if !region.0.is_null() {
+                    for &(x, y, width, height) in &regions {
+                        let part = CreateRectRgn(x.floor() as i32, y.floor() as i32, (x+width).ceil() as i32, (y+height).ceil() as i32);
+                        if !part.0.is_null() {
+                            let _ = CombineRgn(region, region, part, RGN_OR);
+                            let _ = DeleteObject(part);
+                        }
+                    }
+                    // Successful SetWindowRgn transfers ownership to the OS.
+                    if SetWindowRgn(self.hwnd, region, false) == 0 { let _ = DeleteObject(region); }
+                }
+            }
+            if let Ok(mut current) = self.shared_state.hit_regions.lock() { *current = regions; }
         }
 
         pub fn hwnd(&self) -> HWND {
@@ -321,6 +417,15 @@ pub struct DockWindow {
 }
 
 impl DockWindow {
+    #[cfg(windows)]
+    pub fn place(&mut self, placement: &crate::display::DockPlacement) -> Result<(), String> { self.inner.place(placement) }
+    #[cfg(windows)]
+    pub fn set_hit_regions(&self, tray: (f32, f32, f32, f32), items: &[crate::DockRenderItem]) {
+        let mut regions = vec![tray];
+        regions.extend(items.iter().map(|item| (item.center_x-item.current_size/2.0, item.center_y-item.current_size/2.0, item.current_size, item.current_size)));
+        self.inner.set_hit_regions(regions);
+    }
+
     /// Creates and displays the layered topmost dock window.
     pub fn create(config: DockWindowConfig) -> Result<Self, String> {
         #[cfg(windows)]

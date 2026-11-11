@@ -61,13 +61,20 @@ impl AppIndexer {
         // 2. Platform-specific application indexing
         #[cfg(windows)]
         {
-            self.scan_windows_start_menu();
+            self.items.extend(crate::app_catalog::AppCatalog::discover().spotlight_items());
         }
 
         #[cfg(not(windows))]
         {
             self.populate_mock_applications();
         }
+    }
+
+    pub fn from_catalog(catalog: &crate::app_catalog::AppCatalog) -> Self {
+        let mut indexer = Self::new();
+        indexer.register_system_settings();
+        indexer.items.extend(catalog.spotlight_items());
+        indexer
     }
 
     /// Searches indexed items and evaluates math expressions.
@@ -149,39 +156,6 @@ impl AppIndexer {
         }
     }
 
-    #[cfg(windows)]
-    fn scan_windows_start_menu(&mut self) {
-        use std::collections::HashSet;
-        use std::path::PathBuf;
-
-        let mut search_dirs = Vec::new();
-        let mut seen_titles = HashSet::new();
-
-        if let Ok(prog_data) = std::env::var("ProgramData") {
-            search_dirs.push(
-                PathBuf::from(prog_data)
-                    .join("Microsoft")
-                    .join("Windows")
-                    .join("Start Menu")
-                    .join("Programs"),
-            );
-        }
-
-        if let Ok(app_data) = std::env::var("APPDATA") {
-            search_dirs.push(
-                PathBuf::from(app_data)
-                    .join("Microsoft")
-                    .join("Windows")
-                    .join("Start Menu")
-                    .join("Programs"),
-            );
-        }
-
-        for dir in search_dirs {
-            scan_directory_recursive(&dir, &mut self.items, &mut seen_titles, 0);
-        }
-    }
-
     #[cfg(not(windows))]
     fn populate_mock_applications(&mut self) {
         let apps = [
@@ -223,50 +197,5 @@ fn format_calc_result(val: f64) -> String {
     } else {
         let s = format!("{:.6}", val);
         s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-}
-
-#[cfg(windows)]
-fn scan_directory_recursive(
-    dir: &std::path::Path,
-    items: &mut Vec<SpotlightItem>,
-    seen_titles: &mut std::collections::HashSet<String>,
-    depth: usize,
-) {
-    if depth > 5 || !dir.is_dir() {
-        return;
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            scan_directory_recursive(&path, items, seen_titles, depth + 1);
-        } else if let Some(ext) = path.extension() {
-            if ext.eq_ignore_ascii_case("lnk") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let lower = stem.to_ascii_lowercase();
-                    // Ignore uninstaller / help shortcuts
-                    if lower.contains("uninstall") || lower.contains("help") || lower.contains("readme") {
-                        continue;
-                    }
-                    if !seen_titles.insert(lower.clone()) {
-                        // Already indexed this application name from another location
-                        continue;
-                    }
-                    let id = format!("app-{}", lower.replace(' ', "-"));
-                    items.push(SpotlightItem::new(
-                        id,
-                        stem.to_string(),
-                        "Application",
-                        SpotlightCategory::Application,
-                        path.to_string_lossy().to_string(),
-                    ));
-                }
-            }
-        }
     }
 }

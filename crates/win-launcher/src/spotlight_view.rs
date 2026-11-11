@@ -2,7 +2,7 @@
 //! State machine and keyboard navigation for the Spotlight search interface.
 //!
 //! Manages:
-//! - Search input buffer and incremental updates (< 1ms search turnaround).
+//! - Search input snapshot and incremental result updates.
 //! - Result ranking and selection state.
 //! - Arrow navigation with toroidal wrap-around.
 //! - Calculation detection and inspection.
@@ -30,6 +30,13 @@ impl SpotlightView {
             selected_index: 0,
             limit: 5,
         }
+    }
+
+    pub fn replace_index(&mut self, indexer: AppIndexer) {
+        let selected = self.selected_item().map(|item| item.id.clone());
+        self.indexer = indexer;
+        self.update_results();
+        self.selected_index = selected.and_then(|id| self.results.iter().position(|item| item.id == id)).unwrap_or(0);
     }
 
     /// Sets the maximum number of results to display.
@@ -92,6 +99,13 @@ impl SpotlightView {
     /// Index of the currently highlighted result row.
     pub fn selected_index(&self) -> usize {
         self.selected_index
+    }
+
+    pub fn select_id(&mut self, id: &str) -> bool {
+        if let Some(index) = self.results.iter().position(|item| item.id == id) {
+            self.selected_index = index;
+            true
+        } else { false }
     }
 
     /// Explicitly sets the selected index if within bounds.

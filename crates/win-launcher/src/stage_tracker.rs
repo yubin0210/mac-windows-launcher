@@ -272,7 +272,9 @@ impl WindowEnumerator for Win32WindowEnumerator {
         }
         let hwnd = HWND(id as usize as *mut _);
         unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+            if windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
         }
         Ok(())
     }

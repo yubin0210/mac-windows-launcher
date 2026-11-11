@@ -1,8 +1,7 @@
 //! spotlight_render
-//! Direct2D 1.1 rasterizer for the Spotlight floating squircle bar and results list.
+//! Native composition background and DirectWrite result list; EDIT owns query painting.
 //!
-//! Windows: Direct2D path geometries for the frosted squircle bar ($n=4.5$),
-//! search magnifying glass icon, selection highlight, category pills, and divider lines.
+//! Windows: shared-device surface, rounded panel, app icons, selection and text.
 //! Non-Windows: High-fidelity mock rasterizer context for unit testing.
 
 use crate::directx::RenderError;
@@ -76,276 +75,148 @@ impl SpotlightRenderContext for MockSpotlightRenderContext {
 #[cfg(windows)]
 mod win32 {
     use super::*;
-    use windows::core::Interface;
-    use windows::Win32::Graphics::Direct2D::Common::{
-        D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D_POINT_2F, D2D_RECT_F,
-    };
-    use windows::Win32::Graphics::Direct2D::{
-        D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-        D2D1_ROUNDED_RECT, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
-    };
-    use windows::Win32::Graphics::Direct3D11::ID3D11Device;
-    use windows::Win32::Graphics::DirectComposition::{IDCompositionDevice, IDCompositionSurface};
-    use windows::Win32::Graphics::Dxgi::Common::{
-        DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
-    };
-    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use crate::{directx::DirectCompositionPipeline, icon_cache::IconPixels, spotlight_layout::SpotlightGeometry};
+    use std::collections::HashMap;
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Direct2D::*;
+    use windows::Win32::Graphics::Direct2D::Common::*;
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::Win32::Graphics::DirectComposition::IDCompositionSurface;
+    use windows::Win32::Graphics::Dxgi::Common::*;
 
-    /// Cached brushes for Spotlight rendering.
     pub struct CachedSpotlightBrushes {
-        pub bar_fill: ID2D1SolidColorBrush,
-        pub bar_stroke: ID2D1SolidColorBrush,
-        pub search_icon: ID2D1SolidColorBrush,
-        pub selection_fill: ID2D1SolidColorBrush,
-        pub category_badge: ID2D1SolidColorBrush,
-        pub divider_stroke: ID2D1SolidColorBrush,
+        pub bar_fill: ID2D1SolidColorBrush, pub bar_stroke: ID2D1SolidColorBrush,
+        pub search_icon: ID2D1SolidColorBrush, pub selection_fill: ID2D1SolidColorBrush,
+        pub category_badge: ID2D1SolidColorBrush, pub divider_stroke: ID2D1SolidColorBrush,
     }
-
     impl CachedSpotlightBrushes {
         pub fn new(context: &ID2D1DeviceContext) -> Result<Self, RenderError> {
-            let create_brush =
-                |r: f32, g: f32, b: f32, a: f32| -> Result<ID2D1SolidColorBrush, RenderError> {
-                    let color = D2D1_COLOR_F { r, g, b, a };
-                    unsafe {
-                        context
-                            .CreateSolidColorBrush(&color, None)
-                            .map_err(RenderError::from)
-                    }
-                };
-
+            let brush = |r, g, b, a| unsafe { context.CreateSolidColorBrush(&D2D1_COLOR_F { r, g, b, a }, None).map_err(RenderError::from) };
             Ok(Self {
-                // Frosted dark glass container fill
-                bar_fill: create_brush(0.12, 0.12, 0.14, 0.88)?,
-                // Subtle acrylic highlight stroke
-                bar_stroke: create_brush(1.0, 1.0, 1.0, 0.15)?,
-                // Magnifying glass icon
-                search_icon: create_brush(0.9, 0.9, 0.9, 0.7)?,
-                // Active row selection accent (macOS blue)
-                selection_fill: create_brush(0.0, 0.48, 1.0, 0.85)?,
-                // Category pill background
-                category_badge: create_brush(0.22, 0.22, 0.25, 0.85)?,
-                // Divider line between search bar and dropdown results
-                divider_stroke: create_brush(1.0, 1.0, 1.0, 0.10)?,
+                bar_fill: brush(32.0/255.0, 36.0/255.0, 41.0/255.0, 1.0)?, bar_stroke: brush(1.0, 1.0, 1.0, 0.2)?,
+                search_icon: brush(0.96, 0.96, 0.96, 1.0)?, selection_fill: brush(0.0, 0.36, 0.74, 0.95)?,
+                category_badge: brush(0.72, 0.75, 0.80, 1.0)?, divider_stroke: brush(1.0, 1.0, 1.0, 0.12)?,
             })
         }
     }
-
-    /// Windows Direct2D Spotlight rasterizer.
+    struct Fonts { scale: f32, title: IDWriteTextFormat, detail: IDWriteTextFormat }
     pub struct Direct2DSpotlightRenderer {
-        factory: ID2D1Factory1,
-        #[allow(dead_code)]
-        d2d_device: ID2D1Device,
-        #[allow(dead_code)]
-        d2d_context: ID2D1DeviceContext,
-        surface: IDCompositionSurface,
-        cached_brushes: Option<CachedSpotlightBrushes>,
+        device: ID2D1Device, surface: IDCompositionSurface,
+        text_factory: IDWriteFactory, fonts: Option<Fonts>, brushes: Option<CachedSpotlightBrushes>,
+        icons: HashMap<String, ID2D1Bitmap1>, size: (u32, u32),
     }
-
     impl Direct2DSpotlightRenderer {
-        pub fn new(
-            d3d_device: &ID3D11Device,
-            comp_device: &IDCompositionDevice,
-            width: u32,
-            height: u32,
-        ) -> Result<Self, RenderError> {
-            let dxgi_device: IDXGIDevice = d3d_device.cast()?;
-            let factory: ID2D1Factory1 = unsafe {
-                windows::Win32::Graphics::Direct2D::D2D1CreateFactory(
-                    D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                    None,
-                )?
-            };
-            let d2d_device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi_device)? };
-            let d2d_context: ID2D1DeviceContext =
-                unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
-
-            let surface: IDCompositionSurface = unsafe {
-                comp_device.CreateSurface(
-                    width,
-                    height,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                    DXGI_ALPHA_MODE_PREMULTIPLIED,
-                )?
-            };
-
-            Ok(Self {
-                factory,
-                d2d_device,
-                d2d_context,
-                surface,
-                cached_brushes: None,
-            })
+        pub fn with_pipeline(pipeline: &DirectCompositionPipeline, width: u32, height: u32) -> Result<Self, RenderError> {
+            let surface = unsafe { pipeline.dcomp_device().CreateSurface(width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)? };
+            unsafe { pipeline.root_visual().SetContent(&surface)?; }
+            Ok(Self { device: pipeline.d2d_device().clone(), surface,
+                text_factory: unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? }, fonts: None, brushes: None,
+                icons: HashMap::new(), size: (width, height) })
         }
-
-        pub fn surface(&self) -> &IDCompositionSurface {
-            &self.surface
+        pub fn surface(&self) -> &IDCompositionSurface { &self.surface }
+        pub fn resize(&mut self, pipeline: &DirectCompositionPipeline, width: u32, height: u32) -> Result<(), RenderError> {
+            if self.size == (width, height) { return Ok(()); }
+            let surface = unsafe { pipeline.dcomp_device().CreateSurface(width, height, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)? };
+            unsafe { pipeline.root_visual().SetContent(&surface)?; }
+            self.surface = surface; self.size = (width, height);
+            Ok(())
         }
-    }
-
-    impl SpotlightRenderContext for Direct2DSpotlightRenderer {
-        fn render_spotlight(
-            &mut self,
-            _query: &str,
-            results: &[SpotlightItem],
-            selected_idx: usize,
-            width: f32,
-            height: f32,
-        ) -> Result<(), RenderError> {
-            if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-                return Err(RenderError::InvalidGeometry(
-                    "Width and height must be positive, finite numbers",
-                ));
+        pub fn retain_icons(&mut self, ids: &[String]) { self.icons.retain(|id, _| ids.contains(id)); }
+        pub fn set_icon(&mut self, id: &str, pixels: &IconPixels) -> Result<(), RenderError> {
+            let context = unsafe { self.device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
+            let bitmap = crate::directx::upload_icon(&context, pixels)?;
+            self.icons.insert(id.into(), bitmap);
+            Ok(())
+        }
+        fn fonts(&mut self, scale: f32) -> Result<(), RenderError> {
+            if self.fonts.as_ref().is_some_and(|fonts| fonts.scale == scale) { return Ok(()); }
+            let create = |size: f32| -> Result<IDWriteTextFormat, RenderError> {
+                let format = unsafe { self.text_factory.CreateTextFormat(windows::core::w!("Segoe UI"), None,
+                    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size * scale, windows::core::w!(""))? };
+                unsafe { format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?; format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?; }
+                Ok(format)
+            };
+            self.fonts = Some(Fonts { scale, title: create(16.0)?, detail: create(11.0)? });
+            Ok(())
+        }
+        fn text(&self, context: &ID2D1DeviceContext, text: &str, format: &IDWriteTextFormat, brush: &ID2D1SolidColorBrush, bounds: D2D_RECT_F) -> Result<(), RenderError> {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let layout = unsafe { self.text_factory.CreateTextLayout(&units, format, (bounds.right-bounds.left).max(1.0), (bounds.bottom-bounds.top).max(1.0))? };
+            let ellipsis = unsafe { self.text_factory.CreateEllipsisTrimmingSign(format)? };
+            unsafe {
+                layout.SetTrimming(&DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() }, &ellipsis)?;
+                context.DrawTextLayout(D2D_POINT_2F { x: bounds.left, y: bounds.top }, &layout, brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
-
-            let mut offset = windows::Win32::Foundation::POINT::default();
-            let draw_dc: ID2D1DeviceContext =
-                unsafe { self.surface.BeginDraw(None, &mut offset)? };
-
-            if self.cached_brushes.is_none() {
-                if let Ok(brushes) = CachedSpotlightBrushes::new(&draw_dc) {
-                    self.cached_brushes = Some(brushes);
-                }
+            Ok(())
+        }
+        pub fn draw(&mut self, query: &str, results: &[SpotlightItem], selected: usize, geometry: SpotlightGeometry) -> Result<(), RenderError> {
+            if geometry.width <= 0 || geometry.height <= 0 || !geometry.scale.is_finite() || geometry.scale <= 0.0 || self.size != (geometry.width as u32, geometry.height as u32) {
+                return Err(RenderError::InvalidGeometry("Spotlight geometry does not match its surface"));
             }
-
-            let draw_result = (|| -> Result<(), RenderError> {
-                let brushes = self
-                    .cached_brushes
-                    .as_ref()
-                    .ok_or_else(|| RenderError::DrawingFailed("Failed to initialize brush cache".to_string()))?;
-
-                // Clear with transparent black
-                let clear_color = D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.0,
-                };
-                unsafe { draw_dc.Clear(Some(&clear_color)) };
-
-                let ox = offset.x as f32;
-                let oy = offset.y as f32;
-
-                // 1. Draw frosted squircle container bar
-                let half_w = width * 0.5;
-                let half_h = height * 0.5;
-                let pts = generate_squircle_contour(width, height, 4.5, 64);
-                if pts.len() >= 4 {
-                    let path_geom = unsafe { self.factory.CreatePathGeometry()? };
-                    let sink = unsafe { path_geom.Open()? };
-
-                    let first = pts[0];
-                    unsafe {
-                        sink.BeginFigure(
-                            D2D_POINT_2F {
-                                x: ox + half_w + first.0,
-                                y: oy + half_h + first.1,
-                            },
-                            D2D1_FIGURE_BEGIN_FILLED,
-                        );
-
-                        for p in &pts[1..] {
-                            sink.AddLine(D2D_POINT_2F {
-                                x: ox + half_w + p.0,
-                                y: oy + half_h + p.1,
-                            });
-                        }
-
-                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                        sink.Close()?;
-
-                        draw_dc.FillGeometry(&path_geom, &brushes.bar_fill, None);
-                        draw_dc.DrawGeometry(&path_geom, &brushes.bar_stroke, 1.0, None);
-                    }
-                }
-
-                // 2. Draw search icon (magnifying glass)
-                let lens_center = D2D_POINT_2F {
-                    x: ox + 26.0,
-                    y: oy + 28.0,
-                };
-                let ellipse = D2D1_ELLIPSE {
-                    point: lens_center,
-                    radiusX: 6.0,
-                    radiusY: 6.0,
-                };
+            self.fonts(geometry.scale)?;
+            let mut offset = POINT::default();
+            let context: ID2D1DeviceContext = unsafe { self.surface.BeginDraw(None, &mut offset)? };
+            let draw = (|| {
+                if self.brushes.is_none() { self.brushes = Some(CachedSpotlightBrushes::new(&context)?); }
+                let brushes = self.brushes.as_ref().ok_or(RenderError::DrawingFailed("Spotlight brushes unavailable".into()))?;
+                let fonts = self.fonts.as_ref().ok_or(RenderError::DrawingFailed("Spotlight fonts unavailable".into()))?;
+                let scale = geometry.scale;
+                let ox = offset.x as f32; let oy = offset.y as f32;
+                let width = geometry.width as f32; let height = geometry.height as f32;
+                let bounds = |left, top, right, bottom| D2D_RECT_F { left: ox + left, top: oy + top, right: ox + right, bottom: oy + bottom };
                 unsafe {
-                    draw_dc.DrawEllipse(&ellipse, &brushes.search_icon, 2.0, None);
-                    draw_dc.DrawLine(
-                        D2D_POINT_2F {
-                            x: ox + 30.5,
-                            y: oy + 32.5,
-                        },
-                        D2D_POINT_2F {
-                            x: ox + 36.0,
-                            y: oy + 38.0,
-                        },
-                        &brushes.search_icon,
-                        2.0,
-                        None,
-                    );
+                    context.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+                    let panel = D2D1_ROUNDED_RECT { rect: bounds(0.5, 0.5, width-0.5, height-0.5), radiusX: 14.0*scale, radiusY: 14.0*scale };
+                    context.FillRoundedRectangle(&panel, &brushes.bar_fill);
+                    context.DrawRoundedRectangle(&panel, &brushes.bar_stroke, 1.0, None);
+                    let lens = D2D1_ELLIPSE { point: D2D_POINT_2F { x: ox + 24.0*scale, y: oy + 26.0*scale }, radiusX: 6.0*scale, radiusY: 6.0*scale };
+                    context.DrawEllipse(&lens, &brushes.category_badge, 1.8*scale, None);
+                    context.DrawLine(D2D_POINT_2F { x: ox+28.0*scale, y: oy+30.0*scale }, D2D_POINT_2F { x: ox+34.0*scale, y: oy+36.0*scale }, &brushes.category_badge, 1.8*scale, None);
                 }
-
-                // 3. Draw divider line and results list if results exist
-                if !results.is_empty() {
-                    let divider_y = oy + 56.0;
-                    unsafe {
-                        draw_dc.DrawLine(
-                            D2D_POINT_2F {
-                                x: ox + 16.0,
-                                y: divider_y,
-                            },
-                            D2D_POINT_2F {
-                                x: ox + width - 16.0,
-                                y: divider_y,
-                            },
-                            &brushes.divider_stroke,
-                            1.0,
-                            None,
-                        );
+                // The native child EDIT paints the query, caret and IME composition above this tree.
+                for (index, item) in results.iter().take(geometry.visible_rows).enumerate() {
+                    let y = geometry.header + index as f32 * geometry.row_height;
+                    if index == selected {
+                        let row = D2D1_ROUNDED_RECT { rect: bounds(8.0*scale, y+2.0*scale, width-8.0*scale, y+geometry.row_height-2.0*scale), radiusX: 7.0*scale, radiusY: 7.0*scale };
+                        unsafe { context.FillRoundedRectangle(&row, &brushes.selection_fill); }
                     }
-
-                    for (i, _item) in results.iter().enumerate() {
-                        let item_y = divider_y + i as f32 * 48.0;
-
-                        // Draw selection highlight for active row
-                        if i == selected_idx {
-                            let sel_rect = D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: ox + 12.0,
-                                    top: item_y + 4.0,
-                                    right: ox + width - 12.0,
-                                    bottom: item_y + 44.0,
-                                },
-                                radiusX: 8.0,
-                                radiusY: 8.0,
-                            };
-                            unsafe {
-                                draw_dc.FillRoundedRectangle(&sel_rect, &brushes.selection_fill);
-                            }
-                        }
-
-                        // Draw category badge pill
-                        let badge_rect = D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: ox + width - 84.0,
-                                top: item_y + 14.0,
-                                right: ox + width - 16.0,
-                                bottom: item_y + 34.0,
-                            },
-                            radiusX: 4.0,
-                            radiusY: 4.0,
-                        };
-                        unsafe {
-                            draw_dc.FillRoundedRectangle(&badge_rect, &brushes.category_badge);
-                        }
+                    let icon = bounds(16.0*scale, y+8.0*scale, 48.0*scale, y+40.0*scale);
+                    if let Some(bitmap) = self.icons.get(&item.id) {
+                        let size = unsafe { bitmap.GetSize() };
+                        let factor = (32.0*scale/size.width).min(32.0*scale/size.height);
+                        let center_x = ox+32.0*scale; let center_y = oy+y+24.0*scale;
+                        let target = D2D_RECT_F { left: center_x-size.width*factor/2.0, right: center_x+size.width*factor/2.0,
+                            top: center_y-size.height*factor/2.0, bottom: center_y+size.height*factor/2.0 };
+                        unsafe { context.DrawBitmap(bitmap, Some(&target), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None); }
+                    } else {
+                        let label = if item.category == mac_physics_core::spotlight::SpotlightCategory::Calculation { "=".into() } else { item.title.chars().take(2).collect::<String>() };
+                        self.text(&context, &label, &fonts.title, &brushes.search_icon, icon)?;
                     }
+                    self.text(&context, &item.title, &fonts.title, &brushes.search_icon, bounds(60.0*scale, y+3.0*scale, width-20.0*scale, y+26.0*scale))?;
+                    self.text(&context, &item.subtitle, &fonts.detail, &brushes.category_badge, bounds(60.0*scale, y+25.0*scale, width-20.0*scale, y+43.0*scale))?;
                 }
-
+                if !query.trim().is_empty() && results.is_empty() {
+                    self.text(&context, "No matching apps or settings", &fonts.title, &brushes.category_badge,
+                        bounds(20.0*scale, geometry.header, width-20.0*scale, geometry.header+geometry.row_height))?;
+                }
+                let footer = if results.get(selected).is_some_and(|item| item.category == mac_physics_core::spotlight::SpotlightCategory::Calculation) {
+                    "Enter to copy result · Esc to close"
+                } else if query.trim().is_empty() { "Search apps, settings, or enter a calculation" }
+                else { "↑ ↓ select · Enter open · Esc close" };
+                self.text(&context, footer, &fonts.detail, &brushes.category_badge, bounds(16.0*scale, height-24.0*scale, width-16.0*scale, height-2.0*scale))?;
                 Ok(())
             })();
-
-            let end_draw_result = unsafe { self.surface.EndDraw().map_err(RenderError::from) };
-            draw_result.and(end_draw_result)
+            let end = unsafe { self.surface.EndDraw().map_err(RenderError::from) };
+            draw.and(end)
+        }
+    }
+    impl SpotlightRenderContext for Direct2DSpotlightRenderer {
+        fn render_spotlight(&mut self, query: &str, results: &[SpotlightItem], selected: usize, width: f32, height: f32) -> Result<(), RenderError> {
+            if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return Err(RenderError::InvalidGeometry("Invalid Spotlight dimensions")); }
+            let scale = width/640.0;
+            let geometry = SpotlightGeometry { x: 0, y: 0, width: width as i32, height: height as i32, scale,
+                header: 56.0*scale, row_height: 48.0*scale, capacity: 5, visible_rows: results.len().min(5) };
+            self.draw(query, results, selected, geometry)
         }
     }
 }

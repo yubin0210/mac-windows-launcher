@@ -222,7 +222,7 @@ fn is_word_boundary(chars: &[char], j: usize) -> bool {
 /// - Constants: `pi`, `e`
 ///
 /// Returns `None` if the input is empty, not a valid expression, divides by zero,
-/// or produces a non-finite float (overflow/NaN/negative square root).
+/// exceeds 128 recursive grouping/sign/power levels, or produces a non-finite float.
 pub fn evaluate_math(expr: &str) -> Option<f64> {
     let tokens = tokenize(expr)?;
     let mut parser = MathParser::new(tokens);
@@ -341,11 +341,22 @@ fn tokenize(input: &str) -> Option<Vec<Token>> {
 struct MathParser {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
 }
 
 impl MathParser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, depth: 0 }
+    }
+
+    // Bound recursive grouping, unary signs and right-associative powers while
+    // allowing long flat expressions to use their existing iterative loops.
+    fn nested(&mut self, parse: impl FnOnce(&mut Self) -> Option<f64>) -> Option<f64> {
+        if self.depth >= 128 { return None; }
+        self.depth += 1;
+        let value = parse(self);
+        self.depth -= 1;
+        value
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -427,7 +438,7 @@ impl MathParser {
         if let Some(Token::Caret) = self.peek() {
             self.next();
             // Right-associative exponentiation: base ^ power
-            let exp = self.parse_power()?;
+            let exp = self.nested(Self::parse_power)?;
             let result = base.powf(exp);
             if !result.is_finite() {
                 return None;
@@ -442,11 +453,11 @@ impl MathParser {
         match self.peek() {
             Some(Token::Plus) => {
                 self.next();
-                self.parse_unary()
+                self.nested(Self::parse_unary)
             }
             Some(Token::Minus) => {
                 self.next();
-                let val = self.parse_unary()?;
+                let val = self.nested(Self::parse_unary)?;
                 let res = -val;
                 if !res.is_finite() {
                     None
@@ -464,7 +475,7 @@ impl MathParser {
     {
         match self.next()? {
             Token::LParen => {
-                let arg = self.parse_expression()?;
+                let arg = self.nested(Self::parse_expression)?;
                 match self.next()? {
                     Token::RParen => {
                         let res = f(arg)?;
@@ -485,7 +496,7 @@ impl MathParser {
         match self.next()? {
             Token::Number(val) => Some(val),
             Token::LParen => {
-                let val = self.parse_expression()?;
+                let val = self.nested(Self::parse_expression)?;
                 match self.next()? {
                     Token::RParen => Some(val),
                     _ => None,

@@ -113,3 +113,12 @@ fn test_spotlight_item_and_category_serde() {
         assert_eq!(cat, cat_back);
     }
 }
+
+#[test]
+fn calculator_bounds_recursive_pasted_input_without_rejecting_long_flat_sums() {
+    use mac_physics_core::spotlight::evaluate_math;
+    assert_eq!(evaluate_math(&format!("{}1{}", "(".repeat(256), ")".repeat(256))), None);
+    assert_eq!(evaluate_math(&format!("{}1", "-".repeat(256))), None);
+    assert_eq!(evaluate_math(&vec!["1"; 256].join("^")), None);
+    assert_eq!(evaluate_math(&vec!["1"; 256].join("+")), Some(256.0));
+}

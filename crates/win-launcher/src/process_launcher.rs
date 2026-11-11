@@ -108,6 +108,11 @@ pub enum LaunchResult {
 pub struct ProcessLauncher;
 
 impl ProcessLauncher {
+    #[cfg(windows)]
+    pub fn activate_window(hwnd: usize, expected_pid: u32) -> Result<(), String> {
+        win32_launcher::activate_window(hwnd, expected_pid)
+    }
+
     /// Launches or brings an existing instance of `target` to the foreground.
     pub fn launch_or_activate(target: &LaunchTarget, tracker: &AppTracker) -> LaunchResult {
         // Validate target
@@ -180,8 +185,8 @@ impl ProcessLauncher {
 
             #[cfg(windows)]
             {
-                if app.hwnd != 0 {
-                    win32_launcher::activate_window(app.hwnd);
+                if let Err(error) = Self::activate_window(app.hwnd, app.pid) {
+                    return LaunchResult::Failed { target: target.name().into(), error };
                 }
             }
 
@@ -261,12 +266,23 @@ mod win32_launcher {
         SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
     };
 
-    pub fn activate_window(hwnd_val: usize) {
+    pub fn activate_window(hwnd_val: usize, expected_pid: u32) -> Result<(), String> {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, GetWindowThreadProcessId, GetForegroundWindow};
         let hwnd = HWND(hwnd_val as *mut _);
         unsafe {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-            let _ = SetForegroundWindow(hwnd);
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if !IsWindow(hwnd).as_bool() || pid == 0 || pid != expected_pid {
+                return Err("The selected window has closed or changed. Try again.".into());
+            }
+            if windows::Win32::UI::WindowsAndMessaging::IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            if !SetForegroundWindow(hwnd).as_bool() && GetForegroundWindow() != hwnd {
+                return Err("Windows did not allow this window to become active.".into());
+            }
         }
+        Ok(())
     }
 
     pub fn spawn_target(target: &LaunchTarget) -> LaunchResult {
