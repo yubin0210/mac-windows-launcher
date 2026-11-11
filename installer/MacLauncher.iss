@@ -57,6 +57,28 @@ function WaitForSingleObject(Handle: THandle; Milliseconds: DWORD): DWORD;
   external 'WaitForSingleObject@kernel32.dll stdcall';
 function CloseHandle(Handle: THandle): BOOL;
   external 'CloseHandle@kernel32.dll stdcall';
+function GetLongPathNameW(ShortPath: String; LongPath: String; BufferLength: DWORD): DWORD;
+  external 'GetLongPathNameW@kernel32.dll stdcall';
+function ExistingLongPath(const Path: String): String;
+var
+  Buffer: String;
+  Size: DWORD;
+begin
+  SetLength(Buffer, 32768);
+  Size := GetLongPathNameW(ExpandFileName(Path), Buffer, Length(Buffer));
+  Result := '';
+  if (Size > 0) and (Size < Length(Buffer)) then
+    Result := Copy(Buffer, 1, Size);
+end;
+function SameExistingPath(const First, Second: String): Boolean;
+var
+  FirstLong, SecondLong: String;
+begin
+  FirstLong := ExistingLongPath(First);
+  SecondLong := ExistingLongPath(Second);
+  Result := (FirstLong <> '') and (SecondLong <> '') and
+    (CompareText(FirstLong, SecondLong) = 0);
+end;
 function AllowLaunch: Boolean;
 begin
   Result := ExpandConstant('{param:NoLaunch|0}') <> '1';
@@ -81,7 +103,7 @@ begin
     SetLength(Path, Size);
     if not QueryFullProcessImageNameW(Process, 0, Path, Size) then exit;
     SetLength(Path, Size);
-    if CompareText(ExpandFileName(Path), ExpandConstant('{app}\{#MyAppExeName}')) <> 0 then
+    if not SameExistingPath(Path, ExpandConstant('{app}\{#MyAppExeName}')) then
     begin
       Result := True; { Another copy is not owned by this installation. }
       exit;
@@ -119,7 +141,7 @@ begin
     try
       Shell := CreateOleObject('WScript.Shell');
       Shortcut := Shell.CreateShortcut(StartupPath);
-      if CompareText(Shortcut.TargetPath, ExpandConstant('{app}\{#MyAppExeName}')) = 0 then
+      if SameExistingPath(Shortcut.TargetPath, ExpandConstant('{app}\{#MyAppExeName}')) then
         DeleteFile(StartupPath);
     except
       Log('Could not inspect old startup shortcut: ' + GetExceptionMessage);

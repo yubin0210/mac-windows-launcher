@@ -80,6 +80,8 @@ try {
     Assert ((Get-ItemProperty -LiteralPath $Registry).DisplayVersion -ceq $Manifest.version) 'Installed version mismatch.'
     $Payload = $Manifest.files | Where-Object name -eq 'win-launcher.exe'
     Assert ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $Payload.sha256) 'Installed payload differs from the tested package.'
+    $UserFile = Join-Path $Install 'user-kept.txt'
+    'User-owned file, not an installer payload.' | Set-Content -LiteralPath $UserFile -Encoding utf8NoBOM
     New-Item -ItemType Directory -Path $Data -Force | Out-Null
     '{"version":1,"pinned":[],"menu_bar_enabled":true,"stage_enabled":true}' | Set-Content -LiteralPath $Preferences -Encoding utf8NoBOM
     $Before = (Get-FileHash -LiteralPath $Preferences).Hash
@@ -102,6 +104,12 @@ try {
     Assert (-not (Test-Path -LiteralPath $Startup)) 'Legacy automatic startup opt-out was not applied.'
     Assert ((Get-FileHash -LiteralPath $Preferences).Hash -eq $Before) 'Update changed user preferences.'
 
+    # A shortcut with the same display name but a different target is not ours.
+    $Link = $Shell.CreateShortcut($Startup); $Link.TargetPath = (Join-Path $PSHOME 'pwsh.exe'); $Link.Save()
+    Run-Installer $Setup ($BaseArguments + '/TASKS="startmenuicon"')
+    Assert (Test-Path -LiteralPath $Startup) "Setup removed another application's startup shortcut."
+    Remove-Item -LiteralPath $Startup
+
     Run-Installer $Setup ($BaseArguments + '/TASKS="startmenuicon,autostart"')
     Assert (Test-Path -LiteralPath $Startup) 'Explicit automatic startup was not configured.'
     Start-Smoke -Hold
@@ -111,6 +119,7 @@ try {
     Assert (-not (Test-Path -LiteralPath $Registry)) 'Registration remains after uninstall.'
     Assert (-not (Test-Path -LiteralPath $Startup)) 'Startup shortcut remains.'
     Assert (-not (Test-Path -LiteralPath $StartMenu)) 'Start Menu shortcut remains.'
+    Assert (Test-Path -LiteralPath $UserFile) 'Uninstall removed an untracked user file.'
     Assert ((Get-FileHash -LiteralPath $Preferences).Hash -eq $Before) 'Uninstall removed or changed user preferences.'
     $Manifest.installer_lifecycle = 'passed'
     $Manifest | Add-Member -NotePropertyName runtime_startup_smoke -NotePropertyValue 'passed' -Force
